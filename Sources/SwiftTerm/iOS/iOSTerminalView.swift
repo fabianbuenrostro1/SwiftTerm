@@ -2084,8 +2084,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     func ensureCaretIsVisible ()
     {
-        let displayBuffer = terminal.displayBuffer
-        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
+        // Use the live buffer, not displayBuffer. During DEC Mode 2026
+        // (synchronized output), displayBuffer returns a frozen snapshot
+        // whose line count may be stale, corrupting the content offset.
+        let buf = terminal.buffer
+        contentOffset = CGPoint (x: 0, y: CGFloat (buf.lines.count-buf.rows)*cellDimension.height)
     }
     
     public func deleteBackward() {

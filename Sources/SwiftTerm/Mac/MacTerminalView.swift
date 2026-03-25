@@ -2306,12 +2306,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     
     func ensureCaretIsVisible ()
     {
-        let displayBuffer = terminal.displayBuffer
-        let realCaret = displayBuffer.y + displayBuffer.yBase
-        let viewportEnd = displayBuffer.yDisp + displayBuffer.rows
-        
-        if realCaret >= viewportEnd || realCaret < displayBuffer.yDisp {
-            scrollTo (row: displayBuffer.yBase)
+        // Use the live buffer, not displayBuffer. During DEC Mode 2026
+        // (synchronized output), displayBuffer returns a frozen snapshot
+        // whose yBase/yDisp/y are stale. scrollTo() modifies the live
+        // buffer's yDisp, so reading stale positions corrupts scroll state.
+        let buf = terminal.buffer
+        let realCaret = buf.y + buf.yBase
+        let viewportEnd = buf.yDisp + buf.rows
+
+        if realCaret >= viewportEnd || realCaret < buf.yDisp {
+            scrollTo (row: buf.yBase)
         }
     }
     
