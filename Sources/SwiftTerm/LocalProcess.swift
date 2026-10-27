@@ -86,6 +86,35 @@ public class LocalProcess {
     
     var io: DispatchIO?
 
+    private var _readsInFlight = 0
+    private let readCountLock = NSLock()
+
+    /// The number of reads open on the pseudo-terminal: 1 while the child runs, 0 once it ends.
+    /// One `DispatchIO.read` calls its handler many times before it is done, so the next read
+    /// starts only on `done`; this count shows they never pile up.
+    public var readsInFlight: Int {
+        readCountLock.lock()
+        defer { readCountLock.unlock() }
+        return _readsInFlight
+    }
+
+    /// Opens the next read on the channel, counted until its handler reports `done`.
+    private func startRead() {
+        guard let io else {
+            return
+        }
+        readCountLock.lock()
+        _readsInFlight += 1
+        readCountLock.unlock()
+        io.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+    }
+
+    private func readEnded() {
+        readCountLock.lock()
+        _readsInFlight = max(0, _readsInFlight - 1)
+        readCountLock.unlock()
+    }
+
     private let usesMainQueue: Bool
     private let pendingChunkFlushThreshold = 32
     private let pendingTimeSliceNs: UInt64 = 4_000_000
@@ -235,11 +264,17 @@ public class LocalProcess {
 
     /* Total number of bytes read */
     var totalRead = 0
+    // One read calls this many times: with the bytes since the last call and `done` false, then
+    // once with `done` true. Only `done` ends the read, so only `done` starts the next one;
+    // starting one on every call left a new read queued behind the open one each time.
     func childProcessRead (done: Bool, data: DispatchData?, errno: Int32) {
+        if done {
+            readEnded()
+        }
         guard let data else {
             // Re-schedule the read on transient errors to keep the chain alive
-            if !done, running {
-                io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+            if done, running, errno == EINTR || errno == EAGAIN {
+                startRead()
             }
             return
         }
@@ -247,8 +282,12 @@ public class LocalProcess {
             totalRead += data.count
             print ("[READ] count=\(data.count) received from host total=\(totalRead)")
         }
-        
+
         if data.count == 0 {
+            // An empty partial result waits for the read's own end
+            guard done else {
+                return
+            }
             childfd = -1
             if running {
                 // Keep process monitor alive so the exit event can still deliver
@@ -280,7 +319,9 @@ public class LocalProcess {
                 self.delegate?.dataReceived(slice: b[...])
             }
         }
-        io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+        if done, running {
+            startRead()
+        }
     }
 
 #if os(macOS)
@@ -368,7 +409,7 @@ public class LocalProcess {
             }
             io.setLimit(lowWater: 1)
             io.setLimit(highWater: readSize)
-            io.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+            startRead()
             
             // Start subprocess with swift-subprocess asynchronously
             Task {
@@ -467,7 +508,7 @@ public class LocalProcess {
             }
             io.setLimit(lowWater: 1)
             io.setLimit(highWater: readSize)
-            io.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+            startRead()
         }
     }
 
